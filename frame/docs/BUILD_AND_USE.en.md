@@ -82,6 +82,27 @@ Pass the following environment variables to the Windows DXVK process:
 | `DXVK_GAZE_FILE` | Wine-visible path to the file written by the bridge |
 | `DXVK_GAZE_DOT` | Normally `0`; use `1` for alignment |
 | `DXVK_GAZE_FULL_AREA` / `DXVK_GAZE_MID_AREA` | Optional central/intermediate region controls, retaining upstream semantics |
+| `DXVK_GAZE_FDM` | Experimental: `1` uses `VK_EXT_fragment_density_map` instead of VRS (see below) |
+| `DXVK_GAZE_FDM_TEXEL` | FDM only: density map texel size in pixels, clamped to the device range (default: device minimum, 32 on Adreno 750) |
+
+#### Experimental fragment density map (FDM) path
+
+`DXVK_GAZE_FDM=1` replaces the shading-rate attachment with an
+`R8G8_UNORM` density map and takes precedence over `DXVK_GAZE_VRS`. It needs
+`fragmentDensityMap` and `fragmentDensityMapNonSubsampledImages`; otherwise gaze
+rendering stays at full rate. Differences from the VRS path:
+
+- The map texel is at least 32x32 pixels on Adreno 750 (VRS: 8x8), so the fovea
+  boundary is coarser and the CPU map is much smaller.
+- Only single-layer side-by-side eye passes are driven by gaze. Two-layer passes
+  need `VK_VALVE_fragment_density_map_layered` and keep full density.
+- Graphics pipelines are created with
+  `VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT`, and
+  every render pass gets a density map (gaze maps for eye passes, all-full-density
+  maps elsewhere). Pipeline flag placement across library stages and secondary
+  command buffers has not been checked with the validation layers yet.
+- `fragmentDensityMapDynamic` is false on this device: maps are uploaded before
+  the pass begins, which matches the existing double-buffered upload.
 
 The publisher writes to the current user's
 `$HOME/.local/share/frame-pcvr/gaze/frame-gaze-v1.bin`.

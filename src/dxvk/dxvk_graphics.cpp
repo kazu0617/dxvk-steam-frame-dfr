@@ -528,7 +528,7 @@ namespace dxvk {
       msInfo.alphaToCoverageEnable = state.msInfo.alphaToCoverageEnable;
 
     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, &state.rtInfo };
-    flags.flags = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR;
+    flags.flags = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR | dxvkGazeFdmPipelineFlags(m_device);
 
     if (state.feedbackLoop & VK_IMAGE_ASPECT_COLOR_BIT)
       flags.flags |= VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
@@ -1391,7 +1391,7 @@ namespace dxvk {
     }};
 
     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
-    flags.flags = vs.linkFlags | fs.linkFlags;
+    flags.flags = vs.linkFlags | fs.linkFlags | dxvkGazeFdmPipelineFlags(m_device);
 
     if (m_device->canUseDescriptorHeap())
       flags.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
@@ -1476,6 +1476,7 @@ namespace dxvk {
       stageInfo.addStage(m_shaders.fs->metadata(), getShaderCode(*m_shaders.fs, key.shState.fsInfo), &key.scState.scInfo);
 
     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
+    flags.flags |= dxvkGazeFdmPipelineFlags(m_device);
 
     if (!m_flags.test(DxvkGraphicsPipelineFlag::HasRasterizerDiscard)) {
       if (key.foState.feedbackLoop & VK_IMAGE_ASPECT_COLOR_BIT)

@@ -88,4 +88,46 @@ int main() {
   assert(!frame_dfr::build_map({2880,1440,1,8,8}, f, bytes) && bytes.empty());
   f.u[0] = .5f; f.inner_percent = std::numeric_limits<float>::infinity();
   assert(!frame_dfr::build_map({2880,1440,1,8,8}, f, bytes) && bytes.empty());
+
+  // Density conversion: 2 bytes per tile, red = horizontal, green = vertical,
+  // per-layer four-byte padding, exact LUT for the 1x1/2x2/4x4/2x4/4x2 codes.
+  {
+    frame_dfr::Focus df; df.u = {.5f, .5f}; df.v = {.5f, .5f};
+    df.inner_percent = 30; df.outer_percent = 60; df.peripheral_rate = 10;
+    for (const auto shape : {frame_dfr::Layout{2880, 1440, 1, 32, 32},
+                             {161, 81, 1, 32, 32}, {347, 693, 2, 17, 9}}) {
+      std::vector<uint8_t> rates, density;
+      assert(frame_dfr::build_map(shape, df, rates));
+      assert(frame_dfr::to_density(shape, rates, density));
+      const size_t tiles = size_t((shape.width + shape.tile_width - 1) / shape.tile_width)
+                         * ((shape.height + shape.tile_height - 1) / shape.tile_height);
+      const size_t from = (tiles + 3) & ~size_t(3), to = (tiles * 2 + 3) & ~size_t(3);
+      assert(density.size() == to * shape.layers);
+      for (uint32_t layer = 0; layer < shape.layers; ++layer) {
+        for (size_t t = 0; t < tiles; ++t) {
+          const uint8_t code = rates[layer * from + t];
+          const uint8_t dx = density[layer * to + t * 2], dy = density[layer * to + t * 2 + 1];
+          if (code == 0) assert(dx == 255 && dy == 255);
+          if (code == 5) assert(dx == 128 && dy == 128);
+          if (code == 10) assert(dx == 64 && dy == 64);
+          if (code == 6) assert(dx == 128 && dy == 64);
+          if (code == 9) assert(dx == 64 && dy == 128);
+        }
+        for (size_t t = tiles * 2; t < to; ++t) assert(density[layer * to + t] == 0);
+      }
+    }
+    // The centre must be full density and the periphery 4x4 (64) for a centred gaze.
+    frame_dfr::Layout centred{640, 640, 2, 32, 32};
+    std::vector<uint8_t> rates, density;
+    assert(frame_dfr::build_map(centred, df, rates));
+    assert(frame_dfr::to_density(centred, rates, density));
+    const size_t stride = (400 * 2 + 3) & ~size_t(3);  // 20 x 20 tiles per layer
+    assert(density[(10 * 20 + 10) * 2] == 255 && density[(10 * 20 + 10) * 2 + 1] == 255);
+    assert(density[0] == 64 && density[stride - 1 - (stride - 800)] == 64);
+    // Size mismatch and invalid layouts leave an empty result.
+    std::vector<uint8_t> bad{1, 2, 3}, out{9};
+    assert(!frame_dfr::to_density(centred, bad, out) && out.empty());
+    assert(!frame_dfr::to_density({0, 1, 1, 8, 8}, bad, out) && out.empty());
+    assert(!frame_dfr::to_density({64, 64, 3, 8, 8}, bad, out) && out.empty());
+  }
 }

@@ -6593,6 +6593,32 @@ namespace dxvk {
       }
     }
 
+    // Gaze-driven FDM: every pass gets a density map because pipelines carry the
+    // FDM attachment flag. Gaze target passes get the live map, others a neutral one.
+    if (dxvkGazeFdmEnabled(m_device.ptr())) {
+      if (!m_gazeVrs)
+        m_gazeVrs = std::make_unique<DxvkGazeVrs>(m_device.ptr());
+
+      auto& fdmInfo = m_state.om.renderingInfo.gazeFdm;
+      fdmInfo = { VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT };
+
+      const auto& fdmColor = framebufferInfo.getColorTarget(0u);
+      VkRenderingFragmentShadingRateAttachmentInfoKHR unusedVrs = { };
+
+      VkExtent2D fdmExtent = { fbSize.width, fbSize.height };
+
+      bool fdmActive = m_gazeVrs->prepare(m_cmd.ptr(), fdmExtent, fbSize.layers,
+        fdmColor.view ? fdmColor.view->info().format : VK_FORMAT_UNDEFINED,
+        fdmColor.view ? fdmColor.view->image()->info().sampleCount : VK_SAMPLE_COUNT_1_BIT,
+        unusedVrs, &fdmInfo);
+
+      if (!fdmActive)
+        fdmActive = m_gazeVrs->neutralDensity(m_cmd.ptr(), fdmExtent, fdmInfo);
+
+      if (fdmActive)
+        renderingInfo.pNext = &fdmInfo;
+    }
+
     if (useSecondaryCmdBuffer) {
       m_flags.set(DxvkContextFlag::GpRenderPassSecondaryCmd);
       renderingInfo.flags |= VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
@@ -6601,7 +6627,7 @@ namespace dxvk {
     }
 
     // Dynamic state belongs to the command buffer that records the draws.
-    if (m_gazeVrs) {
+    if (m_gazeVrs && dxvkGazeVrsEnabled(m_device.ptr())) {
       VkExtent2D fragmentSize = { 1u, 1u };
       VkFragmentShadingRateCombinerOpKHR combiner[2] = {
         VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,

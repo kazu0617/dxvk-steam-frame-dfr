@@ -26,11 +26,13 @@ namespace dxvk
     uint32_t flags = 0u, coarse = 5u;
     float r1 = 0.20f, r2 = 0.40f;
     float fullArea = -1.0f, midArea = -1.0f;
+    // false: R8_UINT shading-rate codes (VRS); true: R8G8_UNORM densities (FDM).
+    bool density = false;
 
     bool sameMap(const GazeMapRequest &other) const
     {
       // Preserve the existing tile-granularity gaze update cache.
-      return shape == other.shape && texel == other.texel
+      return shape == other.shape && texel == other.texel && density == other.density
           && center == other.center && flags == other.flags && coarse == other.coarse
           && r1 == other.r1 && r2 == other.r2
           && fullArea == other.fullArea && midArea == other.midArea;
@@ -42,6 +44,7 @@ namespace dxvk
     GazeMapRequest request;
     bool valid = true;
     std::vector<uint8_t> data;
+    std::vector<uint8_t> scratch; // reused rate-code storage for density maps
   };
 
   inline void generateGazeMap(const GazeMapRequest &request, GazeMap &result)
@@ -54,7 +57,13 @@ namespace dxvk
     focus.inner_radius = request.r1; focus.outer_radius = request.r2;
     focus.inner_percent = request.fullArea; focus.outer_percent = request.midArea;
     focus.peripheral_rate = request.coarse;
-    result.valid = frame_dfr::build_map(layout, focus, result.data);
+    if (!request.density) {
+      result.valid = frame_dfr::build_map(layout, focus, result.data);
+      return;
+    }
+    result.valid = frame_dfr::build_map(layout, focus, result.scratch)
+                && frame_dfr::to_density(layout, result.scratch, result.data);
+    if (!result.valid) result.data.clear();
   }
 
   struct GazeMapGenerator

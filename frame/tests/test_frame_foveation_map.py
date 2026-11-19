@@ -53,9 +53,21 @@ int main() {
     std::vector<uint8_t> expected;
     assert(frame_dfr::build_map({r.shape[0],1440,layers,8,16},f,expected));
     assert(actual.valid && actual.data == expected && actual.request.sameMap(r));
+    // FDM requests produce R8G8 densities and never compare equal to VRS maps.
+    dxvk::GazeMapRequest d = r;
+    d.density = true;
+    assert(!d.sameMap(r));
+    dxvk::GazeMap dens;
+    dxvk::generateGazeMap(d,dens);
+    std::vector<uint8_t> expectedDensity;
+    assert(dens.valid && frame_dfr::to_density({r.shape[0],1440,layers,8,16},expected,expectedDensity));
+    assert(dens.data == expectedDensity);
     r.texel[0] = 0;
     dxvk::generateGazeMap(r,actual);
     assert(!actual.valid && actual.data.empty());
+    d.texel[0] = 0;
+    dxvk::generateGazeMap(d,dens);
+    assert(!dens.valid && dens.data.empty());
   }
 }
 ''')

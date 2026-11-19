@@ -26,6 +26,7 @@ namespace dxvk {
     HANDLE_EXT(extDescriptorHeap);                 \
     HANDLE_EXT(extDynamicRenderingUnusedAttachments); \
     HANDLE_EXT(extExtendedDynamicState3);          \
+    HANDLE_EXT(extFragmentDensityMap);             \
     HANDLE_EXT(extFragmentShaderInterlock);        \
     HANDLE_EXT(extFullScreenExclusive);            \
     HANDLE_EXT(extGraphicsPipelineLibrary);        \
@@ -86,6 +87,7 @@ namespace dxvk {
     HANDLE_EXT(extDescriptorBuffer);               \
     HANDLE_EXT(extDescriptorHeap);                 \
     HANDLE_EXT(extExtendedDynamicState3);          \
+    HANDLE_EXT(extFragmentDensityMap);             \
     HANDLE_EXT(extGraphicsPipelineLibrary);        \
     HANDLE_EXT(extLineRasterization);              \
     HANDLE_EXT(extMultiDraw);                      \
@@ -588,6 +590,15 @@ namespace dxvk {
     if (m_featuresSupported.extRobustness2.robustImageAccess2)
       m_featuresSupported.vk13.robustImageAccess = VK_FALSE;
 
+    // Gaze FDM is opt-in (DXVK_GAZE_FDM=1) and needs non-subsampled density
+    // maps; otherwise keep the feature off so default behaviour is unchanged.
+    if (env::getEnvVar("DXVK_GAZE_FDM") != "1"
+     || !m_featuresSupported.extFragmentDensityMap.fragmentDensityMapNonSubsampledImages) {
+      m_featuresSupported.extFragmentDensityMap.fragmentDensityMap = VK_FALSE;
+      m_featuresSupported.extFragmentDensityMap.fragmentDensityMapDynamic = VK_FALSE;
+      m_featuresSupported.extFragmentDensityMap.fragmentDensityMapNonSubsampledImages = VK_FALSE;
+    }
+
     // Vertex attribute divisor is unusable before spec version 3
     if (m_extensionsSupported.extVertexAttributeDivisor.specVersion < 3u) {
       m_featuresSupported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor = VK_FALSE;
@@ -1048,6 +1059,10 @@ namespace dxvk {
 
       /* Gaze-driven VRS */
       ENABLE_EXT_FEATURE(khrFragmentShadingRate, attachmentFragmentShadingRate, false),
+
+      /* Gaze-driven FDM (DXVK_GAZE_FDM=1) */
+      ENABLE_EXT_FEATURE(extFragmentDensityMap, fragmentDensityMap, false),
+      ENABLE_EXT_FEATURE(extFragmentDensityMap, fragmentDensityMapNonSubsampledImages, false),
 
       /* Tiler stuff */
       ENABLE_EXT_FEATURE(khrDynamicRenderingLocalRead, dynamicRenderingLocalRead, false),

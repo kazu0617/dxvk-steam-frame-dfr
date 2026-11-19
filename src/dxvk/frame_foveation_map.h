@@ -147,4 +147,37 @@ inline bool build_map(const Layout &layout, const Focus &focus,
   }
   return true;
 }
+
+// Converts a build_map() result (one VRS rate code per tile, every layer padded
+// to four bytes) into VK_FORMAT_R8G8_UNORM fragment density texels: red is the
+// horizontal and green the vertical density, 255 = full rate, 128 = 1/2, 64 = 1/4.
+// Rate code layout is (log2(width) << 2) | log2(height); each field is masked to
+// two bits, so the 1x1, 2x2 and 4x4 style codes used here round-trip exactly.
+// Each output layer is padded to four bytes. Returns false and leaves `density`
+// empty when `rates` does not match `layout`.
+inline bool to_density(const Layout &layout, const std::vector<uint8_t> &rates,
+                       std::vector<uint8_t> &density) {
+  density.clear();
+  if (!layout.width || !layout.height || !layout.tile_width || !layout.tile_height
+      || (layout.layers != 1 && layout.layers != 2))
+    return false;
+  const uint64_t columns = (uint64_t(layout.width) + layout.tile_width - 1) / layout.tile_width;
+  const uint64_t rows = (uint64_t(layout.height) + layout.tile_height - 1) / layout.tile_height;
+  const uint64_t tiles = columns * rows;
+  if (tiles > 1048576) return false;
+  const size_t source_stride = (size_t(tiles) + 3) & ~size_t(3);
+  const size_t target_stride = (size_t(tiles) * 2 + 3) & ~size_t(3);
+  if (rates.size() != source_stride * layout.layers) return false;
+  static const uint8_t lut[4] = {255, 128, 64, 32};
+  density.assign(target_stride * layout.layers, uint8_t(0));
+  for (uint32_t layer = 0; layer < layout.layers; ++layer) {
+    const uint8_t *from = rates.data() + size_t(layer) * source_stride;
+    uint8_t *to = density.data() + size_t(layer) * target_stride;
+    for (size_t tile = 0; tile < size_t(tiles); ++tile) {
+      to[tile * 2] = lut[(from[tile] >> 2) & 3];
+      to[tile * 2 + 1] = lut[from[tile] & 3];
+    }
+  }
+  return true;
+}
 }

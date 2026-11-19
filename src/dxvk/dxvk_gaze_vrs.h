@@ -17,7 +17,17 @@ namespace dxvk
   class DxvkCommandList;
   struct GazeMap;
 
+  // VRS path: DXVK_GAZE_VRS=1 (disabled when the FDM path is requested).
   bool dxvkGazeVrsEnabled(const DxvkDevice *device);
+
+  // FDM path: DXVK_GAZE_FDM=1 and VK_EXT_fragment_density_map with
+  // non-subsampled images. Replaces VRS when both are requested.
+  bool dxvkGazeFdmRequested();
+  bool dxvkGazeFdmEnabled(const DxvkDevice *device);
+
+  // Pipeline create flag that must accompany every graphics pipeline used with
+  // a density map attachment; zero unless the FDM path is active.
+  VkPipelineCreateFlags2 dxvkGazeFdmPipelineFlags(const DxvkDevice *device);
 
   class DxvkGazeVrs
   {
@@ -32,7 +42,15 @@ namespace dxvk
         uint32_t layers,
         VkFormat colorFormat,
         VkSampleCountFlagBits samples,
-        VkRenderingFragmentShadingRateAttachmentInfoKHR &info);
+        VkRenderingFragmentShadingRateAttachmentInfoKHR &info,
+        VkRenderingFragmentDensityMapAttachmentInfoEXT *fdmInfo = nullptr);
+
+    // FDM path only: attaches an all-full-density map to a pass that is not a
+    // gaze target (call when prepare() returned false).
+    bool neutralDensity(
+        DxvkCommandList *cmd,
+        VkExtent2D extent,
+        VkRenderingFragmentDensityMapAttachmentInfoEXT &info);
 
   private:
     static constexpr uint32_t MaxLayers = 2u;
@@ -60,6 +78,11 @@ namespace dxvk
       std::array<int32_t, 4> dotCenter = {};
     };
     std::array<Rc<Slot>, 2> m_slots;
+    std::map<std::array<uint32_t, 2>, Rc<Slot>> m_neutral;
+    bool m_fdm = false;
+    uint32_t m_bytesPerTile = 1u; // 1: R8_UINT rate codes, 2: R8G8_UNORM densities
+    VkExtent2D m_fdmMinTexel = {32u, 32u};
+    VkExtent2D m_fdmMaxTexel = {1024u, 1024u};
     GazeVrsBufferState m_buffers;
     bool m_ok = false;
     struct Worker;
@@ -92,6 +115,9 @@ namespace dxvk
     std::map<std::array<uint32_t, 5>, uint32_t> m_shapes; // (w, h, layers, fmt, samples) -> pass count
     std::chrono::steady_clock::time_point m_nextSummary = {};
 
+    bool createImageAndBuffer(
+        Slot &slot, VkFormat format, VkImageUsageFlags usage, VkExtent3D extent,
+        uint32_t arrayLayers, uint32_t viewLayers, VkDeviceSize bufferSize);
     bool createResources();
   };
 

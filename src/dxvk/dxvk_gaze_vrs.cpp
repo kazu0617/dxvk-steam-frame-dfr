@@ -59,16 +59,44 @@ namespace dxvk
     return (w << 2) | h;
   }
 
+  bool dxvkGazeFdmRequested()
+  {
+    static const bool requested = env::getEnvVar("DXVK_GAZE_FDM") == "1";
+
+    return requested;
+  }
+
+  bool dxvkGazeFdmEnabled(const DxvkDevice *device)
+  {
+    // Non-subsampled maps are required so that DXVK can render into ordinary
+    // images and sample them with ordinary shaders.
+    const auto &fdm = device->features().extFragmentDensityMap;
+
+    return dxvkGazeFdmRequested() && fdm.fragmentDensityMap && fdm.fragmentDensityMapNonSubsampledImages;
+  }
+
+  VkPipelineCreateFlags2 dxvkGazeFdmPipelineFlags(const DxvkDevice *device)
+  {
+    return dxvkGazeFdmEnabled(device)
+      ? VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT
+      : VkPipelineCreateFlags2(0);
+  }
+
   bool dxvkGazeVrsEnabled(const DxvkDevice *device)
   {
     static const bool requested = env::getEnvVar("DXVK_GAZE_VRS") == "1";
 
-    return requested && device->features().khrFragmentShadingRate.attachmentFragmentShadingRate;
+    // FDM and VRS are mutually exclusive; DXVK_GAZE_FDM=1 selects the FDM path.
+    return requested && !dxvkGazeFdmRequested()
+        && device->features().khrFragmentShadingRate.attachmentFragmentShadingRate;
   }
 
   DxvkGazeVrs::DxvkGazeVrs(DxvkDevice *device)
       : m_device(device)
   {
+    m_fdm = dxvkGazeFdmEnabled(device);
+    m_bytesPerTile = m_fdm ? 2u : 1u;
+
     m_r1 = getEnvFloat("DXVK_GAZE_R1", m_r1);
     m_r2 = getEnvFloat("DXVK_GAZE_R2", m_r2);
     m_fullArea = getEnvFloat("DXVK_GAZE_FULL_AREA", m_fullArea);
@@ -109,6 +137,7 @@ namespace dxvk
       m_mapWorker = std::make_unique<Worker>();
 
     Logger::info(str::format("GazeVRS: init ", m_ok ? "ok" : "FAILED",
+                             m_fdm ? ", FDM (R8G8_UNORM)" : ", VRS",
                              ", double-buffered, texel ", m_texel.width, "x", m_texel.height,
                              ", max tiles ", m_maxTiles.width, "x", m_maxTiles.height,
                              ", r1=", m_r1, " r2=", m_r2, ", full_area=", m_fullArea,
@@ -131,21 +160,12 @@ namespace dxvk
     if (bufferMem) vk->vkFreeMemory(vk->device(), bufferMem, nullptr);
   }
 
-  bool DxvkGazeVrs::createResources()
+  bool DxvkGazeVrs::createImageAndBuffer(
+      Slot &slot, VkFormat format, VkImageUsageFlags usage, VkExtent3D extent,
+      uint32_t arrayLayers, uint32_t viewLayers, VkDeviceSize bufferSize)
   {
     auto vk = m_device->vkd();
     const auto &memProps = m_device->adapter()->memoryProperties();
-
-    const auto &fsrProps = m_device->properties().khrFragmentShadingRate;
-
-    if (fsrProps.minFragmentShadingRateAttachmentTexelSize.width && fsrProps.minFragmentShadingRateAttachmentTexelSize.height)
-      m_texel = fsrProps.minFragmentShadingRateAttachmentTexelSize;
-
-    // Preserve the 8192-pixel coverage of 512 tiles at 16x16 texels on
-    // devices with smaller attachment texels, without reducing the old capacity.
-    const uint32_t maxImageSize = m_device->properties().core.properties.limits.maxImageDimension2D;
-    m_maxTiles.width = std::min(maxImageSize, std::max(512u, (8192u + m_texel.width - 1u) / m_texel.width));
-    m_maxTiles.height = std::min(maxImageSize, std::max(512u, (8192u + m_texel.height - 1u) / m_texel.height));
 
     auto findType = [&](uint32_t bits, VkMemoryPropertyFlags flags) -> int32_t
     {
@@ -157,67 +177,110 @@ namespace dxvk
       return -1;
     };
 
+    VkImageCreateInfo imageInfo = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = format;
+    imageInfo.extent = extent;
+    imageInfo.mipLevels = 1u;
+    imageInfo.arrayLayers = arrayLayers;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = usage;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vk->vkCreateImage(vk->device(), &imageInfo, nullptr, &slot.image))
+      return false;
+
+    VkMemoryRequirements req = {};
+    vk->vkGetImageMemoryRequirements(vk->device(), slot.image, &req);
+
+    int32_t type = findType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (type < 0)
+      return false;
+
+    VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocInfo.allocationSize = req.size;
+    allocInfo.memoryTypeIndex = uint32_t(type);
+
+    if (vk->vkAllocateMemory(vk->device(), &allocInfo, nullptr, &slot.imageMem) || vk->vkBindImageMemory(vk->device(), slot.image, slot.imageMem, 0))
+      return false;
+
+    VkImageViewCreateInfo viewInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = slot.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    viewInfo.format = format;
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, viewLayers};
+
+    if (vk->vkCreateImageView(vk->device(), &viewInfo, nullptr, &slot.view))
+      return false;
+
+    VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bufferInfo.size = bufferSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vk->vkCreateBuffer(vk->device(), &bufferInfo, nullptr, &slot.buffer))
+      return false;
+
+    vk->vkGetBufferMemoryRequirements(vk->device(), slot.buffer, &req);
+    type = findType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (type < 0)
+      return false;
+
+    allocInfo.allocationSize = req.size;
+    allocInfo.memoryTypeIndex = uint32_t(type);
+
+    return !vk->vkAllocateMemory(vk->device(), &allocInfo, nullptr, &slot.bufferMem)
+        && !vk->vkBindBufferMemory(vk->device(), slot.buffer, slot.bufferMem, 0);
+  }
+
+  bool DxvkGazeVrs::createResources()
+  {
+    if (m_fdm)
+    {
+      // Density map texels cover at least the implementation minimum; the map is
+      // resolution independent, so the choice only trades boundary precision
+      // against map size.
+      const auto &fdmProps = m_device->properties().extFragmentDensityMap;
+      m_fdmMinTexel = fdmProps.minFragmentDensityTexelSize;
+      m_fdmMaxTexel = fdmProps.maxFragmentDensityTexelSize;
+
+      uint32_t texel = uint32_t(getEnvFloat("DXVK_GAZE_FDM_TEXEL", float(m_fdmMinTexel.width)));
+      m_texel.width = std::clamp(texel, m_fdmMinTexel.width, m_fdmMaxTexel.width);
+      m_texel.height = std::clamp(texel, m_fdmMinTexel.height, m_fdmMaxTexel.height);
+    }
+    else
+    {
+      const auto &fsrProps = m_device->properties().khrFragmentShadingRate;
+
+      if (fsrProps.minFragmentShadingRateAttachmentTexelSize.width && fsrProps.minFragmentShadingRateAttachmentTexelSize.height)
+        m_texel = fsrProps.minFragmentShadingRateAttachmentTexelSize;
+    }
+
+    // Preserve the 8192-pixel coverage of 512 tiles at 16x16 texels on
+    // devices with smaller attachment texels, without reducing the old capacity.
+    const uint32_t maxImageSize = m_device->properties().core.properties.limits.maxImageDimension2D;
+    m_maxTiles.width = std::min(maxImageSize, std::max(512u, (8192u + m_texel.width - 1u) / m_texel.width));
+    m_maxTiles.height = std::min(maxImageSize, std::max(512u, (8192u + m_texel.height - 1u) / m_texel.height));
+
+    // Each layer starts at a four-byte aligned offset in the upload buffer.
+    const VkDeviceSize layerStride = (VkDeviceSize(m_maxTiles.width) * m_maxTiles.height * m_bytesPerTile + 3u) & ~VkDeviceSize(3u);
+
+    const VkFormat format = m_fdm ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R8_UINT;
+    const VkImageUsageFlags usage = (m_fdm
+      ? VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT
+      : VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR) | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // FDM has no layered path yet (see prepare()); one view layer is enough.
+    const uint32_t viewLayers = m_fdm ? 1u
+      : (m_device->properties().khrFragmentShadingRate.layeredShadingRateAttachments ? MaxLayers : 1u);
+
     for (auto &slot : m_slots)
     {
       slot = new Slot(m_device);
-      VkImageCreateInfo imageInfo = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-      imageInfo.imageType = VK_IMAGE_TYPE_2D;
-      imageInfo.format = VK_FORMAT_R8_UINT;
-      imageInfo.extent = {m_maxTiles.width, m_maxTiles.height, 1u};
-      imageInfo.mipLevels = 1u;
-      imageInfo.arrayLayers = MaxLayers;
-      imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-      imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-      imageInfo.usage = VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-      imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-      imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-      if (vk->vkCreateImage(vk->device(), &imageInfo, nullptr, &slot->image))
-        return false;
-
-      VkMemoryRequirements req = {};
-      vk->vkGetImageMemoryRequirements(vk->device(), slot->image, &req);
-
-      int32_t type = findType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-      if (type < 0)
-        return false;
-
-      VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-      allocInfo.allocationSize = req.size;
-      allocInfo.memoryTypeIndex = uint32_t(type);
-
-      if (vk->vkAllocateMemory(vk->device(), &allocInfo, nullptr, &slot->imageMem) || vk->vkBindImageMemory(vk->device(), slot->image, slot->imageMem, 0))
-        return false;
-
-      VkImageViewCreateInfo viewInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-      viewInfo.image = slot->image;
-      viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-      viewInfo.format = VK_FORMAT_R8_UINT;
-      viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u,
-          fsrProps.layeredShadingRateAttachments ? MaxLayers : 1u};
-
-      if (vk->vkCreateImageView(vk->device(), &viewInfo, nullptr, &slot->view))
-        return false;
-
-      VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-      // Each layer starts at a four-byte aligned offset in the upload buffer.
-      const VkDeviceSize layerStride = (VkDeviceSize(m_maxTiles.width) * m_maxTiles.height + 3u) & ~VkDeviceSize(3u);
-      bufferInfo.size = layerStride * MaxLayers;
-      bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-      bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-      if (vk->vkCreateBuffer(vk->device(), &bufferInfo, nullptr, &slot->buffer))
-        return false;
-
-      vk->vkGetBufferMemoryRequirements(vk->device(), slot->buffer, &req);
-      type = findType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-      if (type < 0)
-        return false;
-
-      allocInfo.allocationSize = req.size;
-      allocInfo.memoryTypeIndex = uint32_t(type);
-
-      if (vk->vkAllocateMemory(vk->device(), &allocInfo, nullptr, &slot->bufferMem) || vk->vkBindBufferMemory(vk->device(), slot->buffer, slot->bufferMem, 0))
+      if (!createImageAndBuffer(*slot, format, usage,
+            {m_maxTiles.width, m_maxTiles.height, 1u}, MaxLayers, viewLayers, layerStride * MaxLayers))
         return false;
     }
 
@@ -230,7 +293,8 @@ namespace dxvk
       uint32_t layers,
       VkFormat colorFormat,
       VkSampleCountFlagBits samples,
-      VkRenderingFragmentShadingRateAttachmentInfoKHR &info)
+      VkRenderingFragmentShadingRateAttachmentInfoKHR &info,
+      VkRenderingFragmentDensityMapAttachmentInfoEXT *fdmInfo)
   {
     // Supported eye image layouts:
     //  - array: 2 layers, one eye per layer
@@ -247,7 +311,10 @@ namespace dxvk
       }
       else if (layers == MaxLayers)
       {
-        candidate = m_device->properties().khrFragmentShadingRate.layeredShadingRateAttachments
+        // TODO: per-layer FDM needs VK_VALVE_fragment_density_map_layered; until
+        // then two-layer eye passes keep a neutral (full-rate) density map.
+        candidate = !m_fdm
+            && m_device->properties().khrFragmentShadingRate.layeredShadingRateAttachments
             && extent.width >= m_minSize && extent.height >= m_minSize;
       }
       else if (layers == 1u)
@@ -259,6 +326,10 @@ namespace dxvk
 
     // Depth-only passes have no color target: no dots, and VRS there would desync depth from the color pass
     if (colorFormat == VK_FORMAT_UNDEFINED)
+      candidate = false;
+
+    // FDM only drives single-layer side-by-side eye passes for now.
+    if (m_fdm && (!sbs || layers != 1u || !fdmInfo))
       candidate = false;
 
     // Optional pass filters, to pick the scene pass out of several same-sized passes
@@ -381,8 +452,12 @@ namespace dxvk
       VkImageMemoryBarrier2 ready = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
       ready.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
       ready.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-      ready.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
-      ready.dstAccessMask = VK_ACCESS_2_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT_KHR;
+      ready.dstStageMask = m_fdm
+        ? VK_PIPELINE_STAGE_2_FRAGMENT_DENSITY_PROCESS_BIT_EXT
+        : VK_PIPELINE_STAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
+      ready.dstAccessMask = m_fdm
+        ? VK_ACCESS_2_FRAGMENT_DENSITY_MAP_READ_BIT_EXT
+        : VK_ACCESS_2_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT_KHR;
       ready.oldLayout = ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
       ready.srcQueueFamilyIndex = ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       ready.image = m_slots[m_buffers.active]->image;
@@ -401,6 +476,7 @@ namespace dxvk
     request.r2 = m_r2;
     request.fullArea = m_fullArea;
     request.midArea = m_midArea;
+    request.density = m_fdm;
 
     if (m_mapWorker->maps.failed())
     {
@@ -428,7 +504,7 @@ namespace dxvk
     if (upload)
     {
       auto &slot = m_slots[back];
-      const uint32_t layerStride = (tilesX * tilesY + 3u) & ~3u;
+      const uint32_t layerStride = (tilesX * tilesY * m_bytesPerTile + 3u) & ~3u;
       const auto &data = m_cpuMap->data;
       const auto &mapRequest = m_cpuMap->request;
 
@@ -558,9 +634,112 @@ namespace dxvk
       }
     }
 
+    if (m_fdm)
+    {
+      // GENERAL is accepted for density maps; FRAGMENT_DENSITY_MAP_OPTIMAL_EXT
+      // would need explicit layout transitions in the barriers above.
+      fdmInfo->imageView = front->view;
+      fdmInfo->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+      return true;
+    }
+
     info.imageView = front->view;
     info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     info.shadingRateAttachmentTexelSize = m_texel;
+    return true;
+  }
+
+  bool DxvkGazeVrs::neutralDensity(
+      DxvkCommandList *cmd,
+      VkExtent2D extent,
+      VkRenderingFragmentDensityMapAttachmentInfoEXT &info)
+  {
+    if (!m_ok || !m_fdm)
+      return false;
+
+    // Pipelines are created with the FDM attachment flag, so every pass needs a
+    // density map. Passes that are not gaze targets get an all-255 map whose size
+    // is the smallest the implementation accepts for this render area.
+    const std::array<uint32_t, 2> key = {
+      std::max(1u, (extent.width + m_fdmMaxTexel.width - 1u) / m_fdmMaxTexel.width),
+      std::max(1u, (extent.height + m_fdmMaxTexel.height - 1u) / m_fdmMaxTexel.height) };
+
+    auto it = m_neutral.find(key);
+
+    if (it == m_neutral.end())
+    {
+      Rc<Slot> slot = new Slot(m_device);
+      const VkDeviceSize bytes = (VkDeviceSize(key[0]) * key[1] * 2u + 3u) & ~VkDeviceSize(3u);
+
+      if (bytes > 65536u || !createImageAndBuffer(*slot, VK_FORMAT_R8G8_UNORM,
+            VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            {key[0], key[1], 1u}, 1u, 1u, bytes))
+      {
+        Logger::err("GazeVRS: failed to create neutral density map");
+        return false;
+      }
+
+      std::vector<uint8_t> data(size_t(bytes), uint8_t(255));
+
+      VkImageMemoryBarrier2 toTransfer = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+      toTransfer.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+      toTransfer.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      toTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      toTransfer.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+      toTransfer.srcQueueFamilyIndex = toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      toTransfer.image = slot->image;
+      toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+      VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+      dep.imageMemoryBarrierCount = 1u;
+      dep.pImageMemoryBarriers = &toTransfer;
+      cmd->cmdPipelineBarrier(DxvkCmdBuffer::ExecBuffer, &dep);
+
+      cmd->cmdUpdateBuffer(DxvkCmdBuffer::ExecBuffer, slot->buffer, 0u, size_t(bytes), data.data());
+
+      VkBufferMemoryBarrier2 bufBarrier = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+      bufBarrier.srcQueueFamilyIndex = bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      bufBarrier.buffer = slot->buffer;
+      bufBarrier.size = VK_WHOLE_SIZE;
+      bufBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+      bufBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      bufBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+      bufBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+      VkDependencyInfo dep2 = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+      dep2.bufferMemoryBarrierCount = 1u;
+      dep2.pBufferMemoryBarriers = &bufBarrier;
+      cmd->cmdPipelineBarrier(DxvkCmdBuffer::ExecBuffer, &dep2);
+
+      VkBufferImageCopy2 region = {VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2};
+      region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+      region.imageExtent = {key[0], key[1], 1u};
+      VkCopyBufferToImageInfo2 copyInfo = {VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2};
+      copyInfo.srcBuffer = slot->buffer;
+      copyInfo.dstImage = slot->image;
+      copyInfo.dstImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+      copyInfo.regionCount = 1u;
+      copyInfo.pRegions = &region;
+      cmd->cmdCopyBufferToImage(DxvkCmdBuffer::ExecBuffer, &copyInfo);
+
+      VkImageMemoryBarrier2 ready = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+      ready.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+      ready.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      ready.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_DENSITY_PROCESS_BIT_EXT;
+      ready.dstAccessMask = VK_ACCESS_2_FRAGMENT_DENSITY_MAP_READ_BIT_EXT;
+      ready.oldLayout = ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+      ready.srcQueueFamilyIndex = ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      ready.image = slot->image;
+      ready.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+      VkDependencyInfo dep3 = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+      dep3.imageMemoryBarrierCount = 1u;
+      dep3.pImageMemoryBarriers = &ready;
+      cmd->cmdPipelineBarrier(DxvkCmdBuffer::ExecBuffer, &dep3);
+
+      it = m_neutral.emplace(key, std::move(slot)).first;
+    }
+
+    cmd->track(it->second);
+    info.imageView = it->second->view;
+    info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     return true;
   }
 
