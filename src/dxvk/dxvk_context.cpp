@@ -6593,8 +6593,8 @@ namespace dxvk {
       }
     }
 
-    // Gaze-driven FDM: every pass gets a density map because pipelines carry the
-    // FDM attachment flag. Gaze target passes get the live map, others a neutral one.
+    // Gaze-driven FDM: gaze target passes get the live density map. Other passes get
+    // none, or a neutral full-density map in strict mode (DXVK_GAZE_FDM_NEUTRAL=1).
     if (dxvkGazeFdmEnabled(m_device.ptr())) {
       if (!m_gazeVrs)
         m_gazeVrs = std::make_unique<DxvkGazeVrs>(m_device.ptr());

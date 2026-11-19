@@ -93,16 +93,23 @@ Pass the following environment variables to the Windows DXVK process:
 rendering stays at full rate. Differences from the VRS path:
 
 - The map texel is at least 32x32 pixels on Adreno 750 (VRS: 8x8), so the fovea
-  boundary is coarser and the CPU map is much smaller.
+  boundary is coarser and the CPU map is much smaller. Measured on Turnip, density
+  is applied per GMEM bin rather than per map texel, which is far coarser still;
+  see [FDM_FINDINGS.md](FDM_FINDINGS.md). Treat it as an experiment.
 - Only single-layer side-by-side eye passes are driven by gaze. Two-layer passes
   need `VK_VALVE_fragment_density_map_layered` and keep full density.
-- Graphics pipelines are created with
-  `VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT`, and
-  every render pass gets a density map (gaze maps for eye passes, all-full-density
-  maps elsewhere). Pipeline flag placement across library stages and secondary
-  command buffers has not been checked with the validation layers yet.
+- Graphics pipelines and pipeline libraries are created with
+  `VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT`.
+  Passes that are not gaze targets get no density map; Turnip renders flagged
+  pipelines correctly without one. `DXVK_GAZE_FDM_NEUTRAL=1` (strict mode) attaches
+  an all-full-density map to them instead, once its upload has completed.
+- A density map written in the same submission that uses it renders as nothing on
+  Turnip, so maps are only used after their upload has completed (gaze maps already
+  worked this way).
 - `fragmentDensityMapDynamic` is false on this device: maps are uploaded before
   the pass begins, which matches the existing double-buffered upload.
+- `frame/tools/fdm_probe.c` is a standalone Vulkan probe that reproduces these
+  measurements on a headset.
 
 The publisher writes to the current user's
 `$HOME/.local/share/frame-pcvr/gaze/frame-gaze-v1.bin`.

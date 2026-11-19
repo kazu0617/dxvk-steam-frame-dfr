@@ -45,8 +45,9 @@ namespace dxvk
         VkRenderingFragmentShadingRateAttachmentInfoKHR &info,
         VkRenderingFragmentDensityMapAttachmentInfoEXT *fdmInfo = nullptr);
 
-    // FDM path only: attaches an all-full-density map to a pass that is not a
-    // gaze target (call when prepare() returned false).
+    // FDM path, strict mode only (DXVK_GAZE_FDM_NEUTRAL=1): attaches an all-full-density
+    // map to a pass that is not a gaze target (call when prepare() returned false).
+    // Returns false until the map's upload has completed on the GPU.
     bool neutralDensity(
         DxvkCommandList *cmd,
         VkExtent2D extent,
@@ -80,6 +81,7 @@ namespace dxvk
     std::array<Rc<Slot>, 2> m_slots;
     std::map<std::array<uint32_t, 2>, Rc<Slot>> m_neutral;
     bool m_fdm = false;
+    bool m_fdmNeutral = false; // DXVK_GAZE_FDM_NEUTRAL=1: strict mode, neutral maps on non-gaze passes
     uint32_t m_bytesPerTile = 1u; // 1: R8_UINT rate codes, 2: R8G8_UNORM densities
     VkExtent2D m_fdmMinTexel = {32u, 32u};
     VkExtent2D m_fdmMaxTexel = {1024u, 1024u};

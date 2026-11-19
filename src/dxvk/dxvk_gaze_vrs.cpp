@@ -96,6 +96,7 @@ namespace dxvk
   {
     m_fdm = dxvkGazeFdmEnabled(device);
     m_bytesPerTile = m_fdm ? 2u : 1u;
+    m_fdmNeutral = env::getEnvVar("DXVK_GAZE_FDM_NEUTRAL") == "1";
 
     m_r1 = getEnvFloat("DXVK_GAZE_R1", m_r1);
     m_r2 = getEnvFloat("DXVK_GAZE_R2", m_r2);
@@ -654,12 +655,15 @@ namespace dxvk
       VkExtent2D extent,
       VkRenderingFragmentDensityMapAttachmentInfoEXT &info)
   {
-    if (!m_ok || !m_fdm)
+    // Strict mode only (DXVK_GAZE_FDM_NEUTRAL=1). Pipelines carry the FDM attachment
+    // flag, so strictly every pass would need a density map; Turnip does not require
+    // one (flagged pipelines render correctly without), and attaching maps to every
+    // pass forces the driver's per-bin FDM path everywhere, so this is off by default.
+    if (!m_ok || !m_fdm || !m_fdmNeutral)
       return false;
 
-    // Pipelines are created with the FDM attachment flag, so every pass needs a
-    // density map. Passes that are not gaze targets get an all-255 map whose size
-    // is the smallest the implementation accepts for this render area.
+    // Passes that are not gaze targets get an all-255 map whose size is the smallest
+    // the implementation accepts for this render area.
     const std::array<uint32_t, 2> key = {
       std::max(1u, (extent.width + m_fdmMaxTexel.width - 1u) / m_fdmMaxTexel.width),
       std::max(1u, (extent.height + m_fdmMaxTexel.height - 1u) / m_fdmMaxTexel.height) };
@@ -734,8 +738,17 @@ namespace dxvk
       dep3.pImageMemoryBarriers = &ready;
       cmd->cmdPipelineBarrier(DxvkCmdBuffer::ExecBuffer, &dep3);
 
-      it = m_neutral.emplace(key, std::move(slot)).first;
+      // Turnip reads non-dynamic density maps before the pass runs: a map written in
+      // the same submission renders as nothing (see frame/docs/FDM_FINDINGS.md). Only
+      // use the map once the GPU has finished the upload (like the gaze slots).
+      cmd->track(slot);
+      cmd->queueSignal(slot->completion, 1u);
+      m_neutral.emplace(key, std::move(slot));
+      return false;
     }
+
+    if (it->second->completion->value() < 1u)
+      return false;
 
     cmd->track(it->second);
     info.imageView = it->second->view;
