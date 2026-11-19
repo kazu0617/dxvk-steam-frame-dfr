@@ -29,6 +29,18 @@ exact source revisions and retained upstream components.
 The upstream asynchronous worker, GAZ2 protocol and VRS resource management
 remain part of the implementation.
 
+## Experimental: fragment density map (FDM) path
+
+The `feature/gaze-fdm` branch adds `DXVK_GAZE_FDM=1`, which drives a
+`VK_EXT_fragment_density_map` attachment from the same gaze pipeline instead of
+the VRS attachment. It is off by default and the VRS path is unchanged. On
+Adreno 750 / Turnip, density is applied per GMEM bin and is much coarser than
+VRS, so treat it as an experiment. Measurements, a standalone probe
+(`frame/tools/fdm_probe.c`) and the usage notes are in
+[FDM_FINDINGS.md](frame/docs/FDM_FINDINGS.md) and the
+[usage guide](frame/docs/BUILD_AND_USE.en.md). It has not been validated in a
+headset session yet.
+
 ## How to use
 
 Start with an existing standalone PCVR setup that can already run Windows

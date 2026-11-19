@@ -23,6 +23,16 @@ DXVKと、ReinaS-64892・poprox24さんらによる視線追従VRSの実装を�
 
 元実装の非同期worker、GAZ2、VRS資源管理は引き継いでいます。
 
+## 実験: fragment density map（FDM）経路
+
+`feature/gaze-fdm`ブランチには、同じ視線パイプラインでVRSの代わりに
+`VK_EXT_fragment_density_map`を使う`DXVK_GAZE_FDM=1`を追加しています。既定ではオフで、
+VRS経路は変わりません。Adreno 750 / Turnipでは密度がGMEMのビン単位でしか適用されず、
+VRSよりかなり粗いため、実験として扱ってください。測定結果・単体のprobe
+（`frame/tools/fdm_probe.c`）・使い方は[FDM_FINDINGS.md](frame/docs/FDM_FINDINGS.md)
+（英語）と[使い方](frame/docs/BUILD_AND_USE.en.md)（英語）にあります。
+ヘッドセットでの実機検証はまだです。
+
 ## 使い方
 
 既にFrame単体でWindows版VRChatをVR表示できる環境を対象にします。
