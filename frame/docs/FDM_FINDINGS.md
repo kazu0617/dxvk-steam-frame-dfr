@@ -14,6 +14,7 @@ Build and run:
 glslangValidator -V --target-env vulkan1.3 frame/tools/fdm_probe.vert -o /tmp/fdm_probe.vert.spv   # header is checked in
 cc -std=c11 -O2 -o fdm_probe frame/tools/fdm_probe.c -lvulkan -lm
 ./fdm_probe --presubmit --radial        # see the file header for all options
+./fdm_probe --presubmit --flat64 --oversized --fill255   # oversized image placement check
 ```
 
 ## Findings
@@ -34,12 +35,26 @@ cc -std=c11 -O2 -o fdm_probe frame/tools/fdm_probe.c -lvulkan -lm
    collapsed to one footprint over the whole image because every block centre was
    outside the inner rings. Smaller blocks (more attachment bytes per pixel, so more
    bins) give finer control, but nothing near the 32 px texel size was observed.
-4. Exact-size, oversized (512x512, top-left written), 32 px and 64 px texel maps, inline
-   and secondary command buffers, `GENERAL` and `FRAGMENT_DENSITY_MAP_OPTIMAL_EXT`
-   layouts all gave identical footprints, so the slot-image strategy of the patch is not
-   a problem.
+4. **The density image is read by pixel position, not stretched over the whole image.**
+   An exact-size map (90x45, texel 32) and a 512x512 image with only the top-left
+   90x45 written gave identical footprints in every layout/command-buffer combination.
+   The decisive check: a 512x512 image filled with 255 whose written corner is 64
+   (`--flat64 --oversized --fill255`) behaved exactly like an exact-size all-64 map
+   (coarse everywhere). A stretched mapping would have left most of the image at full
+   rate. The patch's oversized slot images (only the top-left `tilesX x tilesY` written)
+   are therefore fine. Texel 64 maps (`--texel 64`) and secondary command buffers gave
+   the same footprints too.
 5. Observed footprints were limited to 2 pixels horizontally in the band test and 2x4 in
-   the radial test, never the 4x4 that a density of 64 asks for.
+   the radial test, never the 4x4 that a density of 64 asks for. In the radial test the
+   point the map marks as full density (the "gaze point") was shaded at 2x4 as well,
+   because the bin containing it takes its density from the bin centre.
+6. The probe target is colour-only and single-sample. Real eye passes (SBS 2496x1248,
+   one layer, 1x or 2x MSAA with depth, from the earlier VRS experiment logs) need more
+   attachment memory per pixel, so the driver probably uses more, smaller bins than the
+   ~1536x720 blocks seen here. That was not measured.
+7. `DXVK_GAZE_*` variables reach the Windows process through the kit launcher without an
+   allow-list (earlier experiment logs show `DXVK_GAZE_COARSE`, `DXVK_GAZE_DEBUG` and
+   `DXVK_GAZE_FAKE` taking effect), so `DXVK_GAZE_FDM` does too.
 
 ## Consequence
 

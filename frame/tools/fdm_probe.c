@@ -111,11 +111,13 @@ static int median_run(const uint32_t *px, uint32_t width, uint32_t x0, uint32_t 
 }
 
 int main(int argc, char **argv) {
-  int secondary = 0, oversized = 0, nomap = 0, optimal = 0, uniform = 0, presubmit = 0, radial = 0; uint32_t texel = 32, W = 2880, H = 1440;
+  int secondary = 0, oversized = 0, nomap = 0, optimal = 0, uniform = 0, presubmit = 0, radial = 0, flat64 = 0, fill255 = 0; uint32_t texel = 32, W = 2880, H = 1440;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--secondary")) secondary = 1;
     else if (!strcmp(argv[i], "--oversized")) oversized = 1;
     else if (!strcmp(argv[i], "--optimal")) optimal = 1;  // FRAGMENT_DENSITY_MAP_OPTIMAL_EXT instead of GENERAL
+    else if (!strcmp(argv[i], "--flat64")) flat64 = 1;  // map texels are all 64 (4x4) inside the written region
+    else if (!strcmp(argv[i], "--fill255")) fill255 = 1;  // oversized only: also write 255 into the rest of the image
     else if (!strcmp(argv[i], "--radial")) radial = 1;  // R=G density rings around the centre, like a gaze map
     else if (!strcmp(argv[i], "--presubmit")) presubmit = 1;  // upload the map in its own earlier submission
     else if (!strcmp(argv[i], "--uniform")) uniform = 1;  // all-255 map
@@ -178,18 +180,22 @@ int main(int argc, char **argv) {
   make_image(dev, pd, VK_FORMAT_R8G8_UNORM, imageExtent,
              VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &map, &mapView, &mapMem);
   VkBuffer staging; VkDeviceMemory stagingMem;
-  make_buffer(dev, pd, (VkDeviceSize)mapW * mapH * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &staging, &stagingMem);
+  uint32_t stW = (oversized && fill255) ? imageExtent.width : mapW, stH = (oversized && fill255) ? imageExtent.height : mapH;
+  make_buffer(dev, pd, (VkDeviceSize)stW * stH * 2, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &staging, &stagingMem);
   uint8_t *mapped; CHECK(vkMapMemory(dev, stagingMem, 0, VK_WHOLE_SIZE, 0, (void **)&mapped));
-  for (uint32_t j = 0; j < mapH; j++) for (uint32_t i = 0; i < mapW; i++) {
+  for (uint32_t j = 0; j < stH; j++) for (uint32_t i = 0; i < stW; i++) {
+    uint8_t *t = &mapped[(j * stW + i) * 2];
+    if (i >= mapW || j >= mapH) { t[0] = t[1] = 255; continue; }   // only reached with --fill255
     uint32_t band = uniform ? 0 : i * 3 / mapW;
-    mapped[(j * mapW + i) * 2] = band == 0 ? 255 : band == 1 ? 128 : 64;
-    mapped[(j * mapW + i) * 2 + 1] = (uniform || j < mapH / 2) ? 255 : 128;
+    t[0] = band == 0 ? 255 : band == 1 ? 128 : 64;
+    t[1] = (uniform || j < mapH / 2) ? 255 : 128;
     if (radial) {
       float dx = ((float)i + 0.5f) * texel - W * 0.5f, dy = ((float)j + 0.5f) * texel - H * 0.5f;
       float r = sqrtf(dx * dx + dy * dy) / (float)(H < W ? H : W);
       uint8_t d = r < 0.15f ? 255 : r < 0.30f ? 128 : 64;
-      mapped[(j * mapW + i) * 2] = d; mapped[(j * mapW + i) * 2 + 1] = d;
+      t[0] = d; t[1] = d;
     }
+    if (flat64) t[0] = t[1] = 64;
   }
   vkUnmapMemory(dev, stagingMem);
 
@@ -273,7 +279,7 @@ int main(int argc, char **argv) {
           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
   VkBufferImageCopy copy = { 0 };
   copy.imageSubresource = (VkImageSubresourceLayers){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-  copy.imageExtent = (VkExtent3D){ mapW, mapH, 1 };
+  copy.imageExtent = (VkExtent3D){ stW, stH, 1 };
   vkCmdCopyBufferToImage(up, staging, map, copyLayout, 1, &copy);
   barrier(up, map, copyLayout, mapLayout, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
           VK_PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT_EXT, VK_ACCESS_FRAGMENT_DENSITY_MAP_READ_BIT_EXT);
